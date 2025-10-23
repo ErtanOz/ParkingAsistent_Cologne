@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Parkhaus monitoring</title>
+  <style>
+    :root{
+      --bg: #0b1220; --card: #121a2b; --muted: #8aa0b6; --text: #e6eef7; --accent: #7dd3fc;
+      --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; --chip: #1f2a44; --shadow: 0 10px 30px rgba(0,0,0,.35); --radius: 16px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,"Helvetica Neue",Arial; color:var(--text);
+      background: radial-gradient(1200px 600px at 10% -10%, #1b2540, transparent), radial-gradient(800px 500px at 110% 10%, #0f1a33, transparent), var(--bg);
+    }
+    .container{max-width:1200px;margin:0 auto;padding:24px}
+    header{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:16px}
+    .title{display:flex;align-items:center;gap:12px}
+    .title h1{font-size:1.5rem;margin:0;letter-spacing:.3px}
+    .badge{padding:6px 10px;border-radius:999px;background:var(--chip);color:var(--accent);font-weight:600;font-size:.85rem;display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(125,211,252,.25)}
+    .status-dot{width:8px;height:8px;border-radius:50%}
+    .dot-ok{background:var(--ok)} .dot-warn{background:var(--warn)} .dot-err{background:var(--err)}
+    .controls{display:flex;gap:10px;flex-wrap:wrap}
+    .control{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.12);color:var(--text);padding:10px 12px;border-radius:12px;outline:none;backdrop-filter:blur(6px)}
+    input.control{min-width:220px} button.control{cursor:pointer} button.control:hover{background:rgba(255,255,255,.08)}
+    .hint{color:var(--muted);font-size:.9rem;margin-top:6px}
+    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:18px}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12);border-radius:var(--radius);padding:14px 14px 12px;box-shadow:var(--shadow)}
+    .card h3{margin:0 0 6px;font-size:1.05rem}
+    .meta{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:.9rem}
+    .kpis{display:flex;gap:14px;margin:12px 0}
+    .kpi{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);padding:10px;border-radius:12px}
+    .kpi .label{color:var(--muted);font-size:.8rem} .kpi .value{font-size:1.2rem;font-weight:700}
+    .trend{padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.1);background:var(--chip);color:#cde7ff;font-size:.8rem}
+    .bar{height:8px;width:100%;background:#0e1526;border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.1)}
+    .bar>span{display:block;height:100%;background:var(--accent)}
+    .footer{margin-top:22px;color:var(--muted);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .toast{position:fixed;right:18px;bottom:18px;background:#1b2338;color:var(--text);border:1px solid rgba(255,255,255,.14);padding:12px 14px;border-radius:12px;box-shadow:var(--shadow);display:none}
+    details.diag{background:rgba(255,255,255,.03);border:1px dashed rgba(255,255,255,.2);padding:10px;border-radius:12px;margin-top:10px}
+    code.small{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem;color:#dbeafe}
+
+    /* Gemini Modal Styles */
+    .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(5px);padding:16px;}
+    .modal-content{background:var(--card);border-radius:var(--radius);padding:20px;width:100%;max-width:500px;box-shadow:var(--shadow);border:1px solid rgba(255,255,255,.12);}
+    .modal-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.1);padding-bottom:10px;margin-bottom:15px;}
+    .modal-header h2{margin:0;color:var(--accent);}
+    .modal-close{background:none;border:none;color:var(--muted);font-size:1.5rem;cursor:pointer;line-height:1;}
+    .modal-body{line-height:1.6;max-height:60vh;overflow-y:auto;}
+    .modal-body p{margin:0;}
+    .modal-body .loading-spinner {
+      width: 40px; height: 40px; border: 4px solid var(--muted);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 1s linear infinite; margin: 20px auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M5 20h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-2-2h-1V9a4 4 0 0 0-4-4H9A4 4 0 0 0 5 9v2H4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2Z" stroke="#7dd3fc" stroke-width="1.5"/>
+          <path d="M8 11V9a3 3 0 0 1 3-3h2a3 3 0 0 1 3 3v2" stroke="#7dd3fc" stroke-width="1.5"/>
+        </svg>
+        <h1>Parkhaus monitoring</h1>
+        <span id="liveBadge" class="badge"><span class="status-dot dot-warn"></span><span>Checking…</span></span>
+      </div>
+      <div class="controls">
+        <input id="search" class="control" placeholder="Suche Parkhaus… (Name / ID)" />
+        <select id="sort" class="control" title="Sortierung">
+          <option value="-free">Sortiere: freie Plätze (absteigend)</option>
+          <option value="free">Sortiere: freie Plätze (aufsteigend)</option>
+          <option value="-fill">Sortiere: Auslastung (absteigend)</option>
+          <option value="name">Sortiere: Name (A→Z)</option>
+          <option value="-name">Sortiere: Name (Z→A)</option>
+        </select>
+        <button id="refreshBtn" class="control">Jetzt aktualisieren</button>
+        <button id="downloadBtn" class="control">Momentaufnahme als CSV</button>
+        <!-- GEMINI FEATURE BUTTON -->
+        <button id="geminiBtn" class="control" style="background:rgba(125, 211, 252, 0.1); border-color: rgba(125, 211, 252, 0.5); color: var(--accent);">Genel Durum Özeti ✨</button>
+      </div>
+    </header>
+
+    <div class="row" style="margin-top:6px">
+      <label class="control" style="display:flex;gap:8px;align-items:center">
+        <input id="modeLive" type="radio" name="mode" value="live" checked /> Live
+      </label>
+      <label class="control" style="display:flex;gap:8px;align-items:center">
+        <input id="modeDemo" type="radio" name="mode" value="demo" /> Demo (eingebaute Beispieldaten)
+      </label>
+      <input id="customProxy" class="control" placeholder="Optional: eigener CORS‑Proxy, z. B. https://proxy.example/" />
+      <button id="runTests" class="control">Self‑Tests ausführen</button>
+    </div>
+
+    <div class="hint" id="hint">
+      Aktualisiert alle 60 Sekunden. Quelle: Stadt Köln Open Data – Echtzeit Parkhausbelegung.
+      <br/>
+      Tipp: Wenn beim lokalen Öffnen als <code class="small">file://</code> ein <em>Failed to fetch</em> auftritt, wechsle auf <strong>Demo</strong> oder starte eine Mini‑Webserver‑Session (z. B. <code class="small">python -m http.server 8000</code>) und öffne dann <code class="small">http://localhost:8000</code>.
+    </div>
+
+    <section class="cards" id="cards"></section>
+
+    <div class="footer">
+      <span id="stamp">Letztes Update: —</span>
+      <span id="staleNote"></span>
+    </div>
+
+    <details class="diag"><summary>Diagnose</summary>
+      <div id="diag"></div>
+    </details>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- GEMINI MODAL -->
+  <div id="geminiModal" class="modal-overlay" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>✨ Akıllı Özet</h2>
+        <button id="modalCloseBtn" class="modal-close">&times;</button>
+      </div>
+      <div id="geminiResult" class="modal-body">
+        <!-- Content will be injected here -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===== Config =====
+    const ENDPOINT = 'https://www.stadt-koeln.de/externe-dienste/open-data/parking.php';
+    const REFRESH_MS = 60_000; // 1 Minute
+
+    // Fallback-Reihenfolge: Direkt → Custom-Proxy → Default-Proxies
+    const DEFAULT_CORS_PROXIES = [
+      'https://cors.isomorphic-git.org/',
+      'https://api.allorigins.win/raw?url='
+    ];
+
+    // ===== Gemini API Config =====
+    const apiKey = ""; // API anahtarı buraya gerekmez, ortam tarafından sağlanır
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+    // ===== Demo sample (acts as test fixtures) =====
+    const SAMPLE_DATA = [
+      { id: 'PH01', name: 'Dom / Hbf', free: 395, capacity: 1000, trend: 0, status: 'geöffnet', address: 'Bahnhofsvorpl.' },
+      { parkhaus_id: 'PH02', bezeichnung: 'Heumarkt / Maritim', frei: 120, kapazitaet: 600, tendenz: 1, geoeffnet: '1', ort: 'Heumarkt' },
+      { identifier: 'PH03', title: 'MediaPark', available: 800, totalCapacity: 1526, tendency: 2, state: true, location: 'Im MediaPark' },
+      { number: 'PH04', description: 'RheinTriadem', aktuell_frei: 0, gesamtplaetze: 450, trend: -1, open: false, adresse: 'Kennedy-Ufer' }
+    ];
+
+    // Demo auto-variation to simulate live changes
+    function mutateSampleInPlace(arr){
+      for(const r of arr){
+        if (typeof r.free === 'number') r.free = Math.max(0, r.free + (Math.random()*40-20)|0);
+        if (typeof r.frei === 'number') r.frei = Math.max(0, r.frei + (Math.random()*20-10)|0);
+        if (typeof r.available === 'number') r.available = Math.max(0, r.available + (Math.random()*50-25)|0);
+      }
+      return arr;
+    }
+
+    // ===== App State =====
+    const state = { lastJsonHash:null, lastChangeAt:null, lastFetchAt:null, data: [], mode: 'live', failures: 0 };
+
+    const el = {
+      cards: document.getElementById('cards'), liveBadge: document.getElementById('liveBadge'), stamp: document.getElementById('stamp'),
+      staleNote: document.getElementById('staleNote'), toast: document.getElementById('toast'), search: document.getElementById('search'),
+      sort: document.getElementById('sort'), refreshBtn: document.getElementById('refreshBtn'), downloadBtn: document.getElementById('downloadBtn'),
+      diag: document.getElementById('diag'), modeLive: document.getElementById('modeLive'), modeDemo: document.getElementById('modeDemo'),
+      customProxy: document.getElementById('customProxy'), runTests: document.getElementById('runTests'),
+      // Gemini elements
+      geminiBtn: document.getElementById('geminiBtn'),
+      geminiModal: document.getElementById('geminiModal'),
+      modalCloseBtn: document.getElementById('modalCloseBtn'),
+      geminiResult: document.getElementById('geminiResult')
+    };
+
+    function showToast(msg){ el.toast.textContent = msg; el.toast.style.display = 'block'; setTimeout(()=> el.toast.style.display='none', 3500); }
+
+    function hashString(str){ let h=5381; for(let i=0;i<str.length;i++){ h=((h<<5)+h)+str.charCodeAt(i); h|=0;} return h.toString(); }
+
+    function mapRecord(r){
+      const lowerKeys = Object.fromEntries(Object.keys(r||{}).map(k=>[k.toLowerCase(), k]));
+      const pick = (...names)=>{ for(const n of names){ if(lowerKeys[n]) return r[lowerKeys[n]]; } return undefined; };
+      const id = pick('id','identifier','parkhausid','parkhaus_id','nr','number');
+      const name = pick('name','parkhaus','title','bezeichnung','description');
+      const free = Number(pick('free','frei','freie','freieplaetze','aktuell_frei','available','availablecapacity'));
+      const capacity = Number(pick('capacity','kapazitaet','gesamt','total','max','gesamtplaetze','totalcapacity'));
+      const trendRaw = pick('trend','tendenz','tendency','tendence');
+      const openRaw = pick('status','state','open','geoeffnet','isopen');
+      const address = pick('address','adresse','location','ort');
+      let occupancy = (Number.isFinite(free) && Number.isFinite(capacity) && capacity>0) ? Math.max(0, Math.min(100, Math.round((1 - (free/capacity)) * 100))) : undefined;
+      let trend = trendRaw;
+      if (typeof trendRaw === 'number') trend = ({'-1':'Keine Daten','0':'Stabil','1':'Entlastung','2':'Schnell frei'}[String(trendRaw)]) || String(trendRaw);
+      if (typeof trendRaw === 'string'){ const t = trendRaw.trim().toLowerCase(); if (['-1','na','none','n/a'].includes(t)) trend = 'Keine Daten'; }
+      let isOpen;
+      if (typeof openRaw === 'boolean') isOpen = openRaw;
+      else if (typeof openRaw === 'string') { const t = openRaw.trim().toLowerCase(); isOpen = ['open','1','true','geöffnet','geoeffnet','offen','ja','yes'].includes(t); }
+      return { id, name, free, capacity, occupancy, trend, isOpen, address, raw:r };
+    }
+
+    function formatTime(ts){ if(!ts) return '—'; const d=new Date(ts); return new Intl.DateTimeFormat('de-DE',{dateStyle:'medium',timeStyle:'medium'}).format(d); }
+
+    function setLiveBadge(kind, text){ const dot = el.liveBadge.querySelector('.status-dot'); const label = el.liveBadge.querySelector('span:last-child'); dot.className = 'status-dot ' + (kind==='ok'?'dot-ok':kind==='warn'?'dot-warn':'dot-err'); label.textContent = text; }
+
+    function render(){
+      const q = (el.search.value||'').trim().toLowerCase();
+      const sort = el.sort.value;
+      let rows = state.data.map(mapRecord).filter(x=>x && (q?((x.name||'').toLowerCase().includes(q) || String(x.id||'').toLowerCase().includes(q)):true));
+      const key = sort.replace(/^[-]/,''); const dir = sort.startsWith('-')?-1:1;
+      rows.sort((a,b)=>{ const va = key==='fill'?(a.occupancy??-1):key==='name'?(a.name||''):key==='free'?(a.free??-1):0; const vb = key==='fill'?(b.occupancy??-1):key==='name'?(b.name||''):key==='free'?(b.free??-1):0; return va<vb?-1*dir:va>vb?1*dir:0; });
+      el.cards.innerHTML = rows.map(r=>{
+        const freeTxt = Number.isFinite(r.free)? r.free.toLocaleString('de-DE') : '—';
+        const capTxt = Number.isFinite(r.capacity)? r.capacity.toLocaleString('de-DE') : '—';
+        const occ = (r.capacity>0 && Number.isFinite(r.occupancy))? r.occupancy : null; // nur wenn Kapazität vorhanden
+        const occTxt = occ!==null? (occ+'%') : '—';
+        const trend = r.trend || '—';
+        const open = (r.isOpen===undefined? '—' : (r.isOpen? 'Geöffnet' : 'Geschlossen'));
+        const bar = Number.isFinite(occ)? `<div class="bar"><span style="width:${occ}%"></span></div>`: '';
+        return `<article class="card" aria-label="${(r.name||'Parkhaus')}">
+          <h3>${r.name||'Unbekannt'}</h3>
+          <div class="meta">${r.id?`<span>#${r.id}</span>`:''}${r.address?`<span>📍 ${r.address}</span>`:''}<span class="trend">${trend}</span></div>
+          <div class="kpis">
+            <div class="kpi"><div class="label">Freie Plätze</div><div class="value">${freeTxt}</div></div>
+            <div class="kpi"><div class="label">Kapazität</div><div class="value">${capTxt}</div></div>
+            <div class="kpi"><div class="label">Auslastung</div><div class="value">${occTxt}</div></div>
+          </div>
+          ${bar}
+          <div class="meta" style="margin-top:10px"><span>🟢 ${open}</span></div>
+        </article>`;
+      }).join('');
+      el.stamp.textContent = 'Letztes Update: ' + formatTime(state.lastFetchAt);
+      const now = Date.now();
+      if (state.lastChangeAt){ const staleFor = Math.round((now - state.lastChangeAt)/1000); if (staleFor <= 120) setLiveBadge('ok', `Live – letzte Änderung vor ${staleFor}s`); else if (staleFor <= 600) setLiveBadge('warn', `Keine Änderung seit ${Math.round(staleFor/60)}min`); else setLiveBadge('err', `Störung? Keine Änderung seit ${Math.round(staleFor/60)}min`); } else { setLiveBadge('warn', 'Checking…'); }
+      const unchangedFor = state.lastChangeAt? Math.round((now - state.lastChangeAt)/60000) : 0; el.staleNote.textContent = unchangedFor>0 ? `Hinweis: Daten haben sich seit ${unchangedFor} Minute(n) nicht verändert.` : '';
+    }
+
+    function buildProxyUrl(base, endpoint){
+      if (!base) return endpoint;
+      if (base.includes('allorigins')) return base + encodeURIComponent(endpoint);
+      return base.replace(/\/$/,'') + '/' + endpoint;
+    }
+
+    async function tryFetch(url, signal){
+      const res = await fetch(url, { signal, cache:'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    async function fetchLive(){
+      const ctrl = new AbortController(); const timer = setTimeout(()=>ctrl.abort(), 12_000);
+      const endpoints = [];
+      // 1) direct
+      endpoints.push(ENDPOINT);
+      // 2) custom proxy
+      const custom = (el.customProxy.value||'').trim();
+      if (custom) endpoints.push(buildProxyUrl(custom, ENDPOINT));
+      // 3) default proxies
+      for(const p of DEFAULT_CORS_PROXIES){ endpoints.push(buildProxyUrl(p, ENDPOINT)); }
+
+      try{
+        let lastErr;
+        for (const u of endpoints){
+          try { return await tryFetch(u, ctrl.signal); }
+          catch(e){ lastErr = e; }
+        }
+        throw lastErr || new Error('Unbekannter Fehler beim Abrufen');
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function fetchDemo(){
+      // simulate network + mutation to exercise the UI and change detection
+      await new Promise(r=>setTimeout(r, 250));
+      return mutateSampleInPlace(SAMPLE_DATA.map(o=>JSON.parse(JSON.stringify(o))));
+    }
+
+    async function fetchData(){
+      try{
+        let data = [];
+        if (state.mode === 'live') data = await fetchLive(); else data = await fetchDemo();
+        state.failures = 0; // reset
+        state.lastFetchAt = Date.now();
+        const jsonStr = JSON.stringify(data); const h = hashString(jsonStr);
+        if (h !== state.lastJsonHash){ state.lastJsonHash = h; state.lastChangeAt = Date.now(); }
+        state.data = Array.isArray(data) ? data : Array.isArray(data?.result) ? data.result : Array.isArray(data?.records) ? data.records : Array.isArray(data?.data) ? data.data : (typeof data === 'object' ? Object.values(data) : []);
+        render();
+        updateDiag('OK', `Modus: ${state.mode.toUpperCase()} | Datensätze: ${state.data.length}`);
+      } catch(err){
+        console.error(err);
+        state.failures++;
+        const offline = typeof navigator !== 'undefined' && navigator && navigator.onLine===false;
+        const likelyCORS = location.protocol === 'file:' || (String(err).includes('Failed to fetch'));
+        let msg = 'Fehler beim Abrufen der Daten: ' + (err.name==='AbortError'?'Zeitüberschreitung':err.message||String(err));
+        if (offline) msg += ' — Hinweis: Du scheinst offline zu sein.';
+        if (likelyCORS) msg += ' — Hinweis: CORS/Datei‑Kontext. Nutze Demo‑Modus, eigenen Proxy veya starte einen lokalen Server.';
+        showToast(msg);
+        setLiveBadge('err','Abruf fehlgeschlagen');
+        updateDiag('ERROR', msg + `\nFehlversuche in Folge: ${state.failures}`);
+        // Auto‑Failover nach 3 Fehlversuchen
+        if (state.mode==='live' && state.failures>=3){
+          state.mode='demo'; el.modeDemo.checked = true;
+          showToast('Automatischer Failover: Live nicht erreichbar → Demo‑Modus aktiviert.');
+          fetchData();
+        }
+      }
+    }
+
+    function toCSV(rows){
+      const mapped = rows.map(mapRecord); const headers = ['id','name','free','capacity','occupancy','trend','isOpen','address'];
+      const lines = [headers.join(';')];
+      for(const r of mapped){ const vals = headers.map(h=>{ const v = (r[h]===undefined || r[h]===null)? '' : String(r[h]).replaceAll('"','""'); return '"'+v+'"'; }); lines.push(vals.join(';')); }
+      return lines.join('\n');
+    }
+
+    function updateDiag(level, text){ el.diag.innerHTML = `<div><strong>Status:</strong> ${level}</div><div style="margin-top:6px;white-space:pre-wrap">${text}</div>`; }
+
+    // ===== Self-tests (unit-like) =====
+    function runSelfTests(){
+      const tests = [];
+      function assert(name, cond){ tests.push({name, pass: !!cond}); }
+      // Test 1: key mapping variants
+      const rec = mapRecord({ parkhaus_id:'X1', bezeichnung:'TestHaus', frei:50, kapazitaet:100, tendenz:1, geoeffnet:'1', ort:'Altstadt' });
+      assert('mapRecord id', rec.id==='X1');
+      assert('mapRecord name', rec.name==='TestHaus');
+      assert('mapRecord free', rec.free===50);
+      assert('mapRecord capacity', rec.capacity===100);
+      assert('mapRecord occupancy calc', rec.occupancy===50);
+      assert('mapRecord trend normalize', rec.trend==='Entlastung');
+      assert('mapRecord open normalize', rec.isOpen===true);
+      // Test 2: trend -1 becomes "Keine Daten"
+      const rec2 = mapRecord({ id:'X2', name:'Foo', free:0, capacity:10, trend:-1 });
+      assert('trend -1 => Keine Daten', rec2.trend==='Keine Daten');
+      // Test 3: boolean open
+      const rec3 = mapRecord({ id:'X3', name:'Bar', free:10, capacity:20, state:false });
+      assert('boolean open false', rec3.isOpen===false);
+      // Test 4: occupancy bounds
+      const rec4 = mapRecord({ id:'X4', name:'Baz', free:9999, capacity:10 });
+      assert('occupancy clamped to >=0%', rec4.occupancy===0);
+      // Test 5: capacity missing → occupancy undefined
+      const rec5 = mapRecord({ id:'X5', name:'NoCap', free:10 });
+      assert('occupancy undefined if capacity missing', typeof rec5.occupancy==='undefined');
+      // Test 6: CSV header and quoting
+      const csv = toCSV([rec, rec2]);
+      assert('csv has header columns', csv.split('\n')[0].split(';').length===8);
+      assert('csv quotes values', /^".*";".*"/.test(csv.split('\n')[1]||''));
+      // Test 7: uppercase keys mapping
+      const rec6 = mapRecord({ ID:'U1', NAME:'Caps', FREE:5, CAPACITY:10, TREND:0, STATUS:'OPEN' });
+      assert('uppercase keys mapped', rec6.id==='U1' && rec6.name==='Caps' && rec6.free===5 && rec6.capacity===10);
+      // Aggregate
+      const ok = tests.every(t=>t.pass);
+      const report = tests.map(t=>`${t.pass?'✓':'✗'} ${t.name}`).join('\n');
+      updateDiag(ok?'TESTS OK':'TESTS FAIL', report);
+      showToast(ok? 'Alle Self‑Tests bestanden.' : 'Self‑Tests haben Fehler.');
+    }
+
+    // ===== Gemini API Functions =====
+
+    /**
+     * Exponential backoff retry-mekanizması ile fetch işlemi yapar.
+     */
+    async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const res = await fetch(url, options);
+          // 429 (Too Many Requests) veya 5xx (Server Error) durumlarında yeniden dene
+          if (res.status === 429 || res.status >= 500) {
+            throw new Error(`HTTP Error ${res.status}`);
+          }
+          // Diğer hatalı durumlarda (örn: 400 Bad Request) yeniden deneme, hatayı döndür
+          if (!res.ok) {
+            return res;
+          }
+          return res; // Başarılı
+        } catch (err) {
+          if (i === retries - 1) throw err; // Son deneme de başarısız oldu
+          // Konsola loglama yapma (talimatlara göre)
+          await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+        }
+      }
+    }
+
+    /**
+     * Gemini API'ye veriyi gönderir ve bir özet alır.
+     */
+    async function callGeminiApi(parkingData) {
+      const systemPrompt = "You are a helpful parking assistant for Cologne, Germany (Köln). Your tone is friendly and helpful. Do not use markdown in your response. Respond in Turkish.";
+      
+      // Veriyi basitleştirerek LLM'in daha kolay anlamasını sağla
+      const simplifiedData = parkingData.map(r => ({
+        name: r.name,
+        occupancy_percent: r.occupancy,
+        free_spaces: r.free,
+        is_open: r.isOpen
+      }));
+
+      const userQuery = `Based on the following JSON data of current parking garage availability, please provide a 2-3 sentence summary for a driver. Advise them on the general parking situation (e.g., 'easy', 'busy', 'very full') and maybe suggest which areas are best or worst. Data: ${JSON.stringify(simplifiedData)}`;
+      
+      const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: {
+          parts: [{ text: systemPrompt }]
+        },
+      };
+
+      const response = await fetchWithRetry(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`API Hatası: ${response.status} ${errorBody}`);
+      }
+
+      const result = await response.json();
+      const candidate = result.candidates?.[0];
+
+      if (candidate && candidate.content?.parts?.[0]?.text) {
+        // Yanıtı basitçe paragraflara ayır (eğer birden fazla varsa)
+        return candidate.content.parts[0].text.replace(/\n/g, '<br>');
+      } else {
+        throw new Error("API'den geçerli bir yanıt alınamadı.");
+      }
+    }
+
+    /**
+     * Gemini düğmesine tıklamayı yönetir.
+     */
+    async function handleGeminiClick() {
+      // Modalı göster ve yükleme durumunu ayarla
+      el.geminiModal.style.display = 'flex';
+      el.geminiResult.innerHTML = '<div class="loading-spinner"></div><p style="text-align:center;">Akıllı özet oluşturuluyor...</p>';
+      el.geminiBtn.disabled = true;
+
+      try {
+        if (!state.data || state.data.length === 0) {
+          throw new Error("Özetlenecek park verisi bulunamadı.");
+        }
+        
+        // Mevcut veriyi işle
+        const parkingData = state.data.map(mapRecord);
+        const summaryText = await callGeminiApi(parkingData);
+        
+        // Sonucu modal'a yaz
+        el.geminiResult.innerHTML = `<p>${summaryText}</p>`;
+
+      } catch (err) {
+        console.error("Gemini API Hatası:", err);
+        el.geminiResult.innerHTML = `<p style="color:var(--err);">Bir hata oluştu: ${err.message}</p>`;
+      } finally {
+        el.geminiBtn.disabled = false;
+      }
+    }
+
+    // ===== Wire up controls =====
+    el.search.addEventListener('input', render);
+    el.sort.addEventListener('change', render);
+    el.refreshBtn.addEventListener('click', fetchData);
+    el.downloadBtn.addEventListener('click', ()=>{ const csv = toCSV(state.data); const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const now = new Date(); a.href = url; a.download = `parkhaus_momentaufnahme_${now.toISOString().replace(/[:.]/g,'-')}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); });
+    el.modeLive.addEventListener('change', ()=>{ if(el.modeLive.checked){ state.mode='live'; state.failures=0; fetchData(); }});
+    el.modeDemo.addEventListener('change', ()=>{ if(el.modeDemo.checked){ state.mode='demo'; state.failures=0; fetchData(); }});
+    el.runTests.addEventListener('click', runSelfTests);
+
+    // Gemini controls
+    el.geminiBtn.addEventListener('click', handleGeminiClick);
+    el.modalCloseBtn.addEventListener('click', () => el.geminiModal.style.display = 'none');
+    el.geminiModal.addEventListener('click', (e) => {
+      // Sadece modal'ın dış arka planına tıklanırsa kapat
+      if (e.target === el.geminiModal) {
+        el.geminiModal.style.display = 'none';
+      }
+    });
+
+
+    // ===== Initial load + interval =====
+    (function init(){
+      if (location.protocol==='file:' || location.href.startsWith('blob:')){
+        // If opened as file or in blob, prefer demo to avoid CORS surprise
+        el.modeDemo.checked = true; 
+        state.mode = 'demo';
+        showToast('Im file:// oder blob:‑Modus wurde der Demo‑Modus aktiviert.');
+        
+        // FIX: Önceki düzeltme (Live modun devre dışı bırakılması) kaldırıldı.
+        // Bu sayede kod, blob: dışında (örn: GitHub Pages) Live modda başlayabilir.
+      }
+      fetchData();
+      setInterval(fetchData, REFRESH_MS);
+    })();
+  </script>
+</body>
+</html>
+
