@@ -143,6 +143,60 @@
     const apiKey = ""; // API anahtarı buraya gerekmez, ortam tarafından sağlanır
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
+    const numberFormatter = new Intl.NumberFormat('de-DE');
+    const trendLabels = {
+      '-1': 'Keine Daten',
+      '0': 'Stabil',
+      '1': 'Entlastung',
+      '2': 'Schnell frei'
+    };
+    const openTrueTokens = new Set(['open','1','true','geoeffnet','geoffnet','offen','ja','yes','auf']);
+    const openFalseTokens = new Set(['closed','0','false','geschlossen','zu','nein','no','gesperrt','dicht']);
+    const normalizeToken = (value) => {
+      const base = String(value ?? '').trim().toLowerCase();
+      try{
+        return base.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      } catch {
+        return base;
+      }
+    };
+    const htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => htmlEscapeMap[char]);
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const cloneData = (value) => (typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value)));
+    const extractRows = (payload) => {
+      if (!payload) return [];
+      if (Array.isArray(payload)) return payload;
+
+      if (Array.isArray(payload?.features)) {
+        return payload.features.map(feature => {
+          if (feature && typeof feature === 'object') {
+            if (feature.attributes && typeof feature.attributes === 'object') {
+              return { ...feature.attributes, geometry: feature.geometry ?? null };
+            }
+            return feature;
+          }
+          return {};
+        });
+      }
+
+      const candidateKeys = ['result', 'results', 'records', 'rows', 'data', 'items', 'entries', 'list', 'values'];
+      for (const key of candidateKeys) {
+        const value = payload?.[key];
+        if (Array.isArray(value)) return value;
+      }
+
+      if (typeof payload === 'object') {
+        const nestedArrays = Object.values(payload).filter(Array.isArray);
+        for (const arr of nestedArrays) {
+          if (arr && arr.length && typeof arr[0] === 'object') return arr;
+        }
+        if (nestedArrays.length) return nestedArrays[0];
+      }
+
+      return [];
+    };
+
     // ===== Demo sample (acts as test fixtures) =====
     const SAMPLE_DATA = [
       { id: 'PH01', name: 'Dom / Hbf', free: 395, capacity: 1000, trend: 0, status: 'geöffnet', address: 'Bahnhofsvorpl.' },
@@ -162,7 +216,7 @@
     }
 
     // ===== App State =====
-    const state = { lastJsonHash:null, lastChangeAt:null, lastFetchAt:null, data: [], mode: 'live', failures: 0 };
+    const state = { lastJsonHash:null, lastChangeAt:null, lastFetchAt:null, data: [], viewData: [], mode: 'live', failures: 0, isFetching: false, hasPendingFetch: false };
 
     const el = {
       cards: document.getElementById('cards'), liveBadge: document.getElementById('liveBadge'), stamp: document.getElementById('stamp'),
@@ -181,24 +235,64 @@
 
     function hashString(str){ let h=5381; for(let i=0;i<str.length;i++){ h=((h<<5)+h)+str.charCodeAt(i); h|=0;} return h.toString(); }
 
-    function mapRecord(r){
-      const lowerKeys = Object.fromEntries(Object.keys(r||{}).map(k=>[k.toLowerCase(), k]));
-      const pick = (...names)=>{ for(const n of names){ if(lowerKeys[n]) return r[lowerKeys[n]]; } return undefined; };
+    function mapRecord(r = {}){
+      const base = (r && typeof r === 'object' && r.attributes && typeof r.attributes === 'object')
+        ? { ...r.attributes, geometry: r.geometry ?? null }
+        : r;
+
+      const lowerKeys = {};
+      for (const key in base){
+        if (Object.prototype.hasOwnProperty.call(base, key)){
+          lowerKeys[key.toLowerCase()] = key;
+        }
+      }
+      const pick = (...names)=>{ for(const n of names){ if(lowerKeys[n]) return base[lowerKeys[n]]; } return undefined; };
+      const toNumber = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : undefined;
+      };
+
       const id = pick('id','identifier','parkhausid','parkhaus_id','nr','number');
       const name = pick('name','parkhaus','title','bezeichnung','description');
-      const free = Number(pick('free','frei','freie','freieplaetze','aktuell_frei','available','availablecapacity'));
-      const capacity = Number(pick('capacity','kapazitaet','gesamt','total','max','gesamtplaetze','totalcapacity'));
+      const free = toNumber(pick('free','frei','freie','freieplaetze','aktuell_frei','available','availablecapacity'));
+      const capacity = toNumber(pick('capacity','kapazitaet','gesamt','total','max','gesamtplaetze','totalcapacity'));
       const trendRaw = pick('trend','tendenz','tendency','tendence');
       const openRaw = pick('status','state','open','geoeffnet','isopen');
       const address = pick('address','adresse','location','ort');
-      let occupancy = (Number.isFinite(free) && Number.isFinite(capacity) && capacity>0) ? Math.max(0, Math.min(100, Math.round((1 - (free/capacity)) * 100))) : undefined;
-      let trend = trendRaw;
-      if (typeof trendRaw === 'number') trend = ({'-1':'Keine Daten','0':'Stabil','1':'Entlastung','2':'Schnell frei'}[String(trendRaw)]) || String(trendRaw);
-      if (typeof trendRaw === 'string'){ const t = trendRaw.trim().toLowerCase(); if (['-1','na','none','n/a'].includes(t)) trend = 'Keine Daten'; }
+
+      let occupancy;
+      if (typeof free === 'number' && typeof capacity === 'number' && capacity > 0){
+        occupancy = Math.max(0, Math.min(100, Math.round((1 - (free / capacity)) * 100)));
+      }
+
+      let trend;
+      if (typeof trendRaw === 'number' && Number.isFinite(trendRaw)){
+        trend = trendLabels[String(trendRaw)] ?? String(trendRaw);
+      } else if (typeof trendRaw === 'string'){
+        const token = normalizeToken(trendRaw);
+        if (trendLabels[token]) {
+          trend = trendLabels[token];
+        } else if (['-1','na','none','n/a','keine daten','keinedaten','k.a'].includes(token)){
+          trend = 'Keine Daten';
+        } else {
+          trend = trendRaw.trim();
+        }
+      }
+
       let isOpen;
-      if (typeof openRaw === 'boolean') isOpen = openRaw;
-      else if (typeof openRaw === 'string') { const t = openRaw.trim().toLowerCase(); isOpen = ['open','1','true','geöffnet','geoeffnet','offen','ja','yes'].includes(t); }
-      return { id, name, free, capacity, occupancy, trend, isOpen, address, raw:r };
+      if (typeof openRaw === 'boolean'){
+        isOpen = openRaw;
+      } else if (typeof openRaw === 'number' && !Number.isNaN(openRaw)){
+        isOpen = openRaw > 0;
+      } else if (typeof openRaw === 'string'){
+        const token = normalizeToken(openRaw);
+        if (openTrueTokens.has(token)) isOpen = true;
+        else if (openFalseTokens.has(token)) isOpen = false;
+      }
+
+      const searchIndex = [id, name, address].filter(Boolean).map(v => normalizeToken(v)).join(' ');
+
+      return { id, name, free, capacity, occupancy, trend, isOpen, address, raw:r, searchIndex };
     }
 
     function formatTime(ts){ if(!ts) return '—'; const d=new Date(ts); return new Intl.DateTimeFormat('de-DE',{dateStyle:'medium',timeStyle:'medium'}).format(d); }
@@ -206,31 +300,52 @@
     function setLiveBadge(kind, text){ const dot = el.liveBadge.querySelector('.status-dot'); const label = el.liveBadge.querySelector('span:last-child'); dot.className = 'status-dot ' + (kind==='ok'?'dot-ok':kind==='warn'?'dot-warn':'dot-err'); label.textContent = text; }
 
     function render(){
-      const q = (el.search.value||'').trim().toLowerCase();
+      const q = normalizeToken(el.search.value || '');
       const sort = el.sort.value;
-      let rows = state.data.map(mapRecord).filter(x=>x && (q?((x.name||'').toLowerCase().includes(q) || String(x.id||'').toLowerCase().includes(q)):true));
-      const key = sort.replace(/^[-]/,''); const dir = sort.startsWith('-')?-1:1;
-      rows.sort((a,b)=>{ const va = key==='fill'?(a.occupancy??-1):key==='name'?(a.name||''):key==='free'?(a.free??-1):0; const vb = key==='fill'?(b.occupancy??-1):key==='name'?(b.name||''):key==='free'?(b.free??-1):0; return va<vb?-1*dir:va>vb?1*dir:0; });
+      const baseRows = state.viewData;
+      const rows = q ? baseRows.filter(row => row.searchIndex.includes(q)) : baseRows.slice();
+      const key = sort.replace(/^[-]/,''); 
+      const dir = sort.startsWith('-')?-1:1;
+      rows.sort((a,b)=>{
+        const valueOf = (row)=>{
+          if (key==='fill') return Number.isFinite(row.occupancy) ? row.occupancy : -1;
+          if (key==='name') return row.name || '';
+          if (key==='free') return Number.isFinite(row.free) ? row.free : -1;
+          return 0;
+        };
+        const va = valueOf(a);
+        const vb = valueOf(b);
+        if (va<vb) return -1*dir;
+        if (va>vb) return 1*dir;
+        return 0;
+      });
+      const locationIcon = '&#x1F4CD;';
+      const openIcons = { open: '&#x1F513;', closed: '&#x1F512;', unknown: '&#x2753;' };
       el.cards.innerHTML = rows.map(r=>{
-        const freeTxt = Number.isFinite(r.free)? r.free.toLocaleString('de-DE') : '—';
-        const capTxt = Number.isFinite(r.capacity)? r.capacity.toLocaleString('de-DE') : '—';
-        const occ = (r.capacity>0 && Number.isFinite(r.occupancy))? r.occupancy : null; // nur wenn Kapazität vorhanden
-        const occTxt = occ!==null? (occ+'%') : '—';
-        const trend = r.trend || '—';
-        const open = (r.isOpen===undefined? '—' : (r.isOpen? 'Geöffnet' : 'Geschlossen'));
-        const bar = Number.isFinite(occ)? `<div class="bar"><span style="width:${occ}%"></span></div>`: '';
-        return `<article class="card" aria-label="${(r.name||'Parkhaus')}">
-          <h3>${r.name||'Unbekannt'}</h3>
-          <div class="meta">${r.id?`<span>#${r.id}</span>`:''}${r.address?`<span>📍 ${r.address}</span>`:''}<span class="trend">${trend}</span></div>
+        const freeTxt = typeof r.free === 'number' ? numberFormatter.format(r.free) : '—';
+        const capTxt = typeof r.capacity === 'number' ? numberFormatter.format(r.capacity) : '—';
+        const occ = typeof r.occupancy === 'number' ? r.occupancy : null;
+        const occTxt = occ!==null ? `${occ}%` : '—';
+        const trendLabel = r.trend ? escapeHtml(r.trend) : '—';
+        const statusKey = r.isOpen === undefined ? 'unknown' : (r.isOpen ? 'open' : 'closed');
+        const openLabel = r.isOpen === undefined ? '—' : (r.isOpen ? 'Geöffnet' : 'Geschlossen');
+        const idMarkup = r.id ? `<span>#${escapeHtml(r.id)}</span>` : '';
+        const addressMarkup = r.address ? `<span>${locationIcon} ${escapeHtml(r.address)}</span>` : '';
+        const bar = occ!==null ? `<div class="bar"><span style="width:${occ}%"></span></div>` : '';
+        const nameLabel = escapeHtml(r.name || 'Unbekannt');
+        const ariaLabel = escapeHtml(r.name || 'Parkhaus');
+        return `<article class="card" aria-label="${ariaLabel}">
+          <h3>${nameLabel}</h3>
+          <div class="meta">${idMarkup}${addressMarkup}<span class="trend">${trendLabel}</span></div>
           <div class="kpis">
             <div class="kpi"><div class="label">Freie Plätze</div><div class="value">${freeTxt}</div></div>
             <div class="kpi"><div class="label">Kapazität</div><div class="value">${capTxt}</div></div>
             <div class="kpi"><div class="label">Auslastung</div><div class="value">${occTxt}</div></div>
           </div>
           ${bar}
-          <div class="meta" style="margin-top:10px"><span>🟢 ${open}</span></div>
+          <div class="meta" style="margin-top:10px"><span>${openIcons[statusKey] || openIcons.unknown} ${escapeHtml(openLabel)}</span></div>
         </article>`;
-      }).join('');
+      }).join('') || `<p class="hint">Keine Ergebnisse.</p>`;
       el.stamp.textContent = 'Letztes Update: ' + formatTime(state.lastFetchAt);
       const now = Date.now();
       if (state.lastChangeAt){ const staleFor = Math.round((now - state.lastChangeAt)/1000); if (staleFor <= 120) setLiveBadge('ok', `Live – letzte Änderung vor ${staleFor}s`); else if (staleFor <= 600) setLiveBadge('warn', `Keine Änderung seit ${Math.round(staleFor/60)}min`); else setLiveBadge('err', `Störung? Keine Änderung seit ${Math.round(staleFor/60)}min`); } else { setLiveBadge('warn', 'Checking…'); }
@@ -274,11 +389,16 @@
 
     async function fetchDemo(){
       // simulate network + mutation to exercise the UI and change detection
-      await new Promise(r=>setTimeout(r, 250));
-      return mutateSampleInPlace(SAMPLE_DATA.map(o=>JSON.parse(JSON.stringify(o))));
+      await sleep(250);
+      return mutateSampleInPlace(cloneData(SAMPLE_DATA));
     }
 
     async function fetchData(){
+      if (state.isFetching){
+        state.hasPendingFetch = true;
+        return;
+      }
+      state.isFetching = true;
       try{
         let data = [];
         if (state.mode === 'live') data = await fetchLive(); else data = await fetchDemo();
@@ -286,7 +406,9 @@
         state.lastFetchAt = Date.now();
         const jsonStr = JSON.stringify(data); const h = hashString(jsonStr);
         if (h !== state.lastJsonHash){ state.lastJsonHash = h; state.lastChangeAt = Date.now(); }
-        state.data = Array.isArray(data) ? data : Array.isArray(data?.result) ? data.result : Array.isArray(data?.records) ? data.records : Array.isArray(data?.data) ? data.data : (typeof data === 'object' ? Object.values(data) : []);
+        const rawRows = extractRows(data);
+        state.data = rawRows;
+        state.viewData = rawRows.map(mapRecord);
         render();
         updateDiag('OK', `Modus: ${state.mode.toUpperCase()} | Datensätze: ${state.data.length}`);
       } catch(err){
@@ -295,24 +417,40 @@
         const offline = typeof navigator !== 'undefined' && navigator && navigator.onLine===false;
         const likelyCORS = location.protocol === 'file:' || (String(err).includes('Failed to fetch'));
         let msg = 'Fehler beim Abrufen der Daten: ' + (err.name==='AbortError'?'Zeitüberschreitung':err.message||String(err));
-        if (offline) msg += ' — Hinweis: Du scheinst offline zu sein.';
-        if (likelyCORS) msg += ' — Hinweis: CORS/Datei‑Kontext. Nutze Demo‑Modus, eigenen Proxy veya starte einen lokalen Server.';
+        if (offline) msg += ' - Hinweis: Du scheinst offline zu sein.';
+        if (likelyCORS) msg += ' - Hinweis: CORS/Datei-Kontext. Nutze Demo-Modus, eigenen Proxy veya starte einen lokalen Server.';
         showToast(msg);
         setLiveBadge('err','Abruf fehlgeschlagen');
         updateDiag('ERROR', msg + `\nFehlversuche in Folge: ${state.failures}`);
-        // Auto‑Failover nach 3 Fehlversuchen
+        // Auto-Failover nach 3 Fehlversuchen
         if (state.mode==='live' && state.failures>=3){
           state.mode='demo'; el.modeDemo.checked = true;
-          showToast('Automatischer Failover: Live nicht erreichbar → Demo‑Modus aktiviert.');
+          showToast('Automatischer Failover: Live nicht erreichbar -> Demo-Modus aktiviert.');
+          fetchData();
+        }
+      } finally {
+        state.isFetching = false;
+        if (state.hasPendingFetch){
+          state.hasPendingFetch = false;
           fetchData();
         }
       }
     }
 
     function toCSV(rows){
-      const mapped = rows.map(mapRecord); const headers = ['id','name','free','capacity','occupancy','trend','isOpen','address'];
+      const source = Array.isArray(rows) ? rows : [];
+      const mapped = source.map(item => (item && item.raw ? item : mapRecord(item)));
+      const headers = ['id','name','free','capacity','occupancy','trend','isOpen','address'];
       const lines = [headers.join(';')];
-      for(const r of mapped){ const vals = headers.map(h=>{ const v = (r[h]===undefined || r[h]===null)? '' : String(r[h]).replaceAll('"','""'); return '"'+v+'"'; }); lines.push(vals.join(';')); }
+      for(const r of mapped){
+        const vals = headers.map(h=>{
+          const value = (r && (h in r)) ? r[h] : undefined;
+          if (value === undefined || value === null) return '""';
+          const safe = String(value).replaceAll('"','""');
+          return `"${safe}"`;
+        });
+        lines.push(vals.join(';'));
+      }
       return lines.join('\n');
     }
 
@@ -350,6 +488,8 @@
       // Test 7: uppercase keys mapping
       const rec6 = mapRecord({ ID:'U1', NAME:'Caps', FREE:5, CAPACITY:10, TREND:0, STATUS:'OPEN' });
       assert('uppercase keys mapped', rec6.id==='U1' && rec6.name==='Caps' && rec6.free===5 && rec6.capacity===10);
+      const rec7 = mapRecord({ attributes: { identifier:'F1', parkhaus:'FeatureHaus', kapazitaet:200, tendenz:0 }, geometry:{x:0,y:0} });
+      assert('feature attributes flattened', rec7.id==='F1' && rec7.name==='FeatureHaus' && rec7.capacity===200);
       // Aggregate
       const ok = tests.every(t=>t.pass);
       const report = tests.map(t=>`${t.pass?'✓':'✗'} ${t.name}`).join('\n');
@@ -378,7 +518,7 @@
         } catch (err) {
           if (i === retries - 1) throw err; // Son deneme de başarısız oldu
           // Konsola loglama yapma (talimatlara göre)
-          await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+          await sleep(delay * Math.pow(2, i));
         }
       }
     }
@@ -438,12 +578,12 @@
       el.geminiBtn.disabled = true;
 
       try {
-        if (!state.data || state.data.length === 0) {
+        if (!state.viewData || state.viewData.length === 0) {
           throw new Error("Özetlenecek park verisi bulunamadı.");
         }
         
         // Mevcut veriyi işle
-        const parkingData = state.data.map(mapRecord);
+        const parkingData = state.viewData;
         const summaryText = await callGeminiApi(parkingData);
         
         // Sonucu modal'a yaz
@@ -461,7 +601,7 @@
     el.search.addEventListener('input', render);
     el.sort.addEventListener('change', render);
     el.refreshBtn.addEventListener('click', fetchData);
-    el.downloadBtn.addEventListener('click', ()=>{ const csv = toCSV(state.data); const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const now = new Date(); a.href = url; a.download = `parkhaus_momentaufnahme_${now.toISOString().replace(/[:.]/g,'-')}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); });
+    el.downloadBtn.addEventListener('click', ()=>{ const dataset = state.viewData && state.viewData.length ? state.viewData : state.data; const csv = toCSV(dataset); const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const now = new Date(); a.href = url; a.download = `parkhaus_momentaufnahme_${now.toISOString().replace(/[:.]/g,'-')}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); });
     el.modeLive.addEventListener('change', ()=>{ if(el.modeLive.checked){ state.mode='live'; state.failures=0; fetchData(); }});
     el.modeDemo.addEventListener('change', ()=>{ if(el.modeDemo.checked){ state.mode='demo'; state.failures=0; fetchData(); }});
     el.runTests.addEventListener('click', runSelfTests);
