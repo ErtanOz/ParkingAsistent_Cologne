@@ -134,6 +134,7 @@ export default async function handler(req, res) {
 ## 🛠️ Troubleshooting
 
 - **Failed to fetch**: Häufig CORS/Origin oder Offline → lokalen Server starten oder Demo‑Modus nutzen.
+- **Keine Live-Daten**: Der städtische Dienst liefert zeitweise keine freien Plätze (Wartungsarbeiten laut stadt-koeln.de). In diesem Fall zeigt das Dashboard Warnungen an – es sind dann leider keine Live-Werte verfügbar.
 - **Windows & Python**: Wenn `python` nicht gefunden wird, probiere `py -m http.server 8000` oder installiere Python von https://www.python.org/downloads/
 - **Langsame Updates**: `REFRESH_MS` anpassen, Proxy prüfen.
 

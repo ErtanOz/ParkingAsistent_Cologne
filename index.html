@@ -216,7 +216,19 @@
     }
 
     // ===== App State =====
-    const state = { lastJsonHash:null, lastChangeAt:null, lastFetchAt:null, data: [], viewData: [], mode: 'live', failures: 0, isFetching: false, hasPendingFetch: false };
+    const state = {
+      lastJsonHash:null,
+      lastChangeAt:null,
+      lastFetchAt:null,
+      data: [],
+      viewData: [],
+      mode: 'live',
+      failures: 0,
+      isFetching: false,
+      hasPendingFetch: false,
+      hasFreeData: true,
+      notifiedMissingFree: false
+    };
 
     const el = {
       cards: document.getElementById('cards'), liveBadge: document.getElementById('liveBadge'), stamp: document.getElementById('stamp'),
@@ -348,8 +360,26 @@
       }).join('') || `<p class="hint">Keine Ergebnisse.</p>`;
       el.stamp.textContent = 'Letztes Update: ' + formatTime(state.lastFetchAt);
       const now = Date.now();
-      if (state.lastChangeAt){ const staleFor = Math.round((now - state.lastChangeAt)/1000); if (staleFor <= 120) setLiveBadge('ok', `Live – letzte Änderung vor ${staleFor}s`); else if (staleFor <= 600) setLiveBadge('warn', `Keine Änderung seit ${Math.round(staleFor/60)}min`); else setLiveBadge('err', `Störung? Keine Änderung seit ${Math.round(staleFor/60)}min`); } else { setLiveBadge('warn', 'Checking…'); }
-      const unchangedFor = state.lastChangeAt? Math.round((now - state.lastChangeAt)/60000) : 0; el.staleNote.textContent = unchangedFor>0 ? `Hinweis: Daten haben sich seit ${unchangedFor} Minute(n) nicht verändert.` : '';
+      if (state.lastChangeAt){
+        const staleFor = Math.round((now - state.lastChangeAt)/1000);
+        if (staleFor <= 120) setLiveBadge('ok', `Live – letzte Änderung vor ${staleFor}s`);
+        else if (staleFor <= 600) setLiveBadge('warn', `Keine Änderung seit ${Math.round(staleFor/60)}min`);
+        else setLiveBadge('err', `Störung? Keine Änderung seit ${Math.round(staleFor/60)}min`);
+      } else {
+        setLiveBadge('warn', 'Checking…');
+      }
+      if (!state.hasFreeData && state.mode === 'live'){
+        setLiveBadge('warn', 'Live – keine Angaben zu freien Plätzen');
+      }
+      const notes = [];
+      const unchangedFor = state.lastChangeAt ? Math.round((now - state.lastChangeAt)/60000) : 0;
+      if (unchangedFor > 0){
+        notes.push(`Hinweis: Daten haben sich seit ${unchangedFor} Minute(n) nicht verändert.`);
+      }
+      if (!state.hasFreeData && state.mode === 'live'){
+        notes.push('Hinweis: Der Live-Dienst liefert aktuell keine freien Plätze (laut Stadt Köln Wartungsarbeiten).');
+      }
+      el.staleNote.textContent = notes.join(' ');
     }
 
     function buildProxyUrl(base, endpoint){
@@ -409,8 +439,16 @@
         const rawRows = extractRows(data);
         state.data = rawRows;
         state.viewData = rawRows.map(mapRecord);
+        const hasFreeData = state.viewData.some(item => typeof item.free === 'number' && !Number.isNaN(item.free));
+        if (hasFreeData){
+          state.notifiedMissingFree = false;
+        } else if (!state.notifiedMissingFree && state.mode === 'live'){
+          showToast('Hinweis: Der Live-Dienst liefert derzeit keine Angaben zu freien Plätzen (Wartungsarbeiten laut stadt-koeln.de).');
+          state.notifiedMissingFree = true;
+        }
+        state.hasFreeData = hasFreeData;
         render();
-        updateDiag('OK', `Modus: ${state.mode.toUpperCase()} | Datensätze: ${state.data.length}`);
+        updateDiag('OK', `Modus: ${state.mode.toUpperCase()} | Datensätze: ${state.data.length} | Freie-Plätze verfügbar: ${state.hasFreeData ? 'ja' : 'nein'}`);
       } catch(err){
         console.error(err);
         state.failures++;
